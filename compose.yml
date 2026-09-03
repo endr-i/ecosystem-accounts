@@ -1,0 +1,20 @@
+services:
+  accounts:
+    build: .
+    environment:
+      # ecosystem-infra publishes a shared Postgres reachable as "postgres" on
+      # the ecosystem network. Set ACCOUNTS_DB_PASSWORD before starting.
+      DATABASE_URL: ${DATABASE_URL:-postgres://postgres:postgres@postgres:5432/auth?sslmode=disable}
+      # Address of ecosystem-auth on the ecosystem network; the JWKS URL is derived from it.
+      AUTH_BASE_URL: ${AUTH_BASE_URL:-http://ecosystem-auth:8080}
+      # The `iss` claim ecosystem-auth puts in its tokens (an identifier, not a URL).
+      AUTH_ISSUER: ecosystem-auth
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    networks:
+      - ecosystem
+
+networks:
+  ecosystem:
+    external: true

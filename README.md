@@ -14,21 +14,49 @@ verifies the access tokens it issues. Backed by PostgreSQL.
 
 ## Running
 
+### Default: against the ecosystem
+
+The default way to run this service is as a container on the shared
+`ecosystem` Docker network published by
+[`ecosystem-infra`](https://github.com/endr-i/ecosystem-infra), using the
+Postgres and `ecosystem-auth` already running there. Start infra first (so the
+`ecosystem` network and its Postgres exist), then:
+
+```sh
+export ACCOUNTS_DB_PASSWORD=<password>
+docker compose -f docker-compose.ecosystem.yml up --build
+```
+
+This starts only the `accounts` container -- no local Postgres -- and attaches
+it to the external `ecosystem` network, where it reaches Postgres at
+`postgres:5432` and `ecosystem-auth` at `http://ecosystem-auth:8080`. If the
+`ecosystem` network doesn't exist yet, `docker compose` fails with a "network
+not found" error; create it (or start `ecosystem-infra`) first.
+
+### Dev: standalone with its own Postgres
+
+For local development without `ecosystem-infra`, `docker-compose.yml` brings up
+its own throwaway Postgres alongside the service:
+
 ```sh
 docker compose up --build
 ```
 
-Or locally against your own Postgres:
+This still expects `ecosystem-auth` reachable at `http://ecosystem-auth:8080`
+to fetch signing keys; run it separately and join it to this compose project's
+network, or override `AUTH_BASE_URL` (see below) to point at wherever it's
+running.
+
+### Running the binary directly
 
 ```sh
-export DATABASE_URL=postgres://accounts:accounts@localhost:5432/accounts?sslmode=disable
+export DATABASE_URL=postgres://accounts:<password>@localhost:5432/accounts?sslmode=disable
 export AUTH_BASE_URL=http://localhost:8080
 go run ./cmd/server
 ```
 
 The service needs `ecosystem-auth` reachable at startup to load its signing
-keys. The `docker-compose.yml` here only brings up Postgres and this service and
-expects `ecosystem-auth` to be running on a shared network.
+keys.
 
 ### Configuration
 
@@ -50,6 +78,14 @@ expects `ecosystem-auth` to be running on a shared network.
 > `AUTH_ISSUER` is the value of the `iss` claim, which `ecosystem-auth`
 > currently sets to the identifier `ecosystem-auth` — not its URL. Only change
 > it if the auth service starts issuing a different `iss`.
+
+`DATABASE_URL` above is only used when running the Go binary directly; each
+compose file builds it from its own variable instead:
+
+| Compose file                   | Variable              | Default    | Notes                                          |
+| ------------------------------- | --------------------- | ---------- | ----------------------------------------------- |
+| `docker-compose.ecosystem.yml`  | `ACCOUNTS_DB_PASSWORD` | *(none)*   | Required; the run fails fast if unset          |
+| `docker-compose.yml` (dev)      | `POSTGRES_PASSWORD`    | `accounts` | Also sets the throwaway Postgres's own password |
 
 ## Token verification
 
