@@ -1,11 +1,12 @@
 // Package authn verifies access tokens issued by ecosystem-auth.
 //
-// Tokens are HS256 JWTs whose subject is the user ID; the signing secret is
-// shared with the auth service, so verification is local and needs no network
-// call.
+// Tokens are RS256 JWTs whose subject is the user ID and whose header carries
+// the `kid` of the signing key. Public keys are fetched from the auth service's
+// JWKS endpoint and cached, so verification needs no per-request network call.
 package authn
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -15,26 +16,31 @@ import (
 var ErrInvalidToken = errors.New("invalid or expired token")
 
 type Verifier struct {
-	secret []byte
+	keys   *KeyCache
 	issuer string
 }
 
-func NewVerifier(secret []byte, issuer string) *Verifier {
-	return &Verifier{secret: secret, issuer: issuer}
+func NewVerifier(keys *KeyCache, issuer string) *Verifier {
+	return &Verifier{keys: keys, issuer: issuer}
 }
 
 // VerifyAccessToken validates the JWT and returns the user ID (subject).
-func (v *Verifier) VerifyAccessToken(tokenStr string) (string, error) {
-	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"HS256"})}
+func (v *Verifier) VerifyAccessToken(ctx context.Context, tokenStr string) (string, error) {
+	opts := []jwt.ParserOption{jwt.WithValidMethods([]string{"RS256"})}
 	if v.issuer != "" {
 		opts = append(opts, jwt.WithIssuer(v.issuer))
 	}
+
 	token, err := jwt.ParseWithClaims(tokenStr, &jwt.RegisteredClaims{},
 		func(t *jwt.Token) (any, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
 				return nil, fmt.Errorf("unexpected signing method %v", t.Header["alg"])
 			}
-			return v.secret, nil
+			kid, _ := t.Header["kid"].(string)
+			if kid == "" {
+				return nil, errors.New("token is missing a kid header")
+			}
+			return v.keys.Key(ctx, kid)
 		}, opts...)
 	if err != nil || !token.Valid {
 		return "", ErrInvalidToken

@@ -86,7 +86,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			s.writeError(w, http.StatusUnauthorized, "missing bearer token")
 			return
 		}
-		userID, err := s.verifier.VerifyAccessToken(tokenStr)
+		userID, err := s.verifier.VerifyAccessToken(r.Context(), tokenStr)
 		if err != nil {
 			s.writeError(w, http.StatusUnauthorized, "invalid or expired token")
 			return
