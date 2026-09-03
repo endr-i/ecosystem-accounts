@@ -1,0 +1,33 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: accounts
+      POSTGRES_PASSWORD: accounts
+      POSTGRES_DB: accounts
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U accounts -d accounts"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  accounts:
+    build: .
+    environment:
+      DATABASE_URL: postgres://accounts:accounts@db:5432/accounts?sslmode=disable
+      # Must match ecosystem-auth's JWT_SECRET.
+      JWT_SECRET: change-me-in-production
+      JWT_ISSUER: ecosystem-auth
+      PORT: "8081"
+    ports:
+      - "8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:
