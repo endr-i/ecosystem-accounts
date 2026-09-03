@@ -1,8 +1,14 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,28 +19,61 @@ import (
 	"github.com/endr-i/ecosystem-accounts/internal/authn"
 )
 
-var testSecret = []byte("test-secret")
+const testKID = "key-test"
 
-func testServer() *Server {
-	return NewServer(nil, authn.NewVerifier(testSecret, "ecosystem-auth"),
-		slog.New(slog.NewTextHandler(io.Discard, nil)))
+type testEnv struct {
+	server *Server
+	priv   *rsa.PrivateKey
 }
 
-func accessToken(t *testing.T, sub string) string {
+func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	tok, err := jwt.NewWithClaims(jwt.SigningMethodHS256, &jwt.RegisteredClaims{
+	priv, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{{
+			"kid": testKID,
+			"kty": "RSA",
+			"use": "sig",
+			"alg": "RS256",
+			"n":   base64.RawURLEncoding.EncodeToString(priv.PublicKey.N.Bytes()),
+			"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(priv.PublicKey.E)).Bytes()),
+		}}})
+	}))
+	t.Cleanup(jwks.Close)
+
+	cache := authn.NewKeyCache(jwks.URL)
+	if err := cache.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh jwks: %v", err)
+	}
+
+	return &testEnv{
+		server: NewServer(nil, authn.NewVerifier(cache, "ecosystem-auth"),
+			slog.New(slog.NewTextHandler(io.Discard, nil))),
+		priv: priv,
+	}
+}
+
+func (e *testEnv) accessToken(t *testing.T, sub string) string {
+	t.Helper()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, &jwt.RegisteredClaims{
 		Subject:   sub,
 		Issuer:    "ecosystem-auth",
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
-	}).SignedString(testSecret)
+	})
+	token.Header["kid"] = testKID
+	s, err := token.SignedString(e.priv)
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	return tok
+	return s
 }
 
 func TestRequireAuthRejectsMissingOrBadToken(t *testing.T) {
-	s := testServer()
+	env := newTestEnv(t)
 	tests := map[string]string{
 		"missing header": "",
 		"not bearer":     "Basic abc",
@@ -47,7 +86,7 @@ func TestRequireAuthRejectsMissingOrBadToken(t *testing.T) {
 			req.Header.Set("Authorization", header)
 		}
 		rec := httptest.NewRecorder()
-		s.Routes().ServeHTTP(rec, req)
+		env.server.Routes().ServeHTTP(rec, req)
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("%s: status = %d, want 401", name, rec.Code)
 		}
@@ -55,14 +94,14 @@ func TestRequireAuthRejectsMissingOrBadToken(t *testing.T) {
 }
 
 func TestRequireAuthPassesUserID(t *testing.T) {
-	s := testServer()
+	env := newTestEnv(t)
 	var seen string
-	h := s.requireAuth(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	h := env.server.requireAuth(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		seen = UserIDFromContext(r.Context())
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/accounts", nil)
-	req.Header.Set("Authorization", "Bearer "+accessToken(t, "user-42"))
+	req.Header.Set("Authorization", "Bearer "+env.accessToken(t, "user-42"))
 	h.ServeHTTP(httptest.NewRecorder(), req)
 
 	if seen != "user-42" {
@@ -72,7 +111,7 @@ func TestRequireAuthPassesUserID(t *testing.T) {
 
 func TestHealth(t *testing.T) {
 	rec := httptest.NewRecorder()
-	testServer().Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	newTestEnv(t).server.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}

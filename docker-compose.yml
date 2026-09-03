@@ -19,9 +19,10 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://accounts:accounts@db:5432/accounts?sslmode=disable
-      # Must match ecosystem-auth's JWT_SECRET.
-      JWT_SECRET: change-me-in-production
-      JWT_ISSUER: ecosystem-auth
+      # Address of ecosystem-auth; the JWKS URL is derived from it.
+      AUTH_BASE_URL: http://ecosystem-auth:8080
+      # The `iss` claim ecosystem-auth puts in its tokens (an identifier, not a URL).
+      AUTH_ISSUER: ecosystem-auth
       PORT: "8081"
     ports:
       - "8081:8081"

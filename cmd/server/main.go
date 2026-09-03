@@ -42,7 +42,17 @@ func main() {
 	}
 
 	accounts := account.NewService(account.NewRepository(pool))
-	verifier := authn.NewVerifier(cfg.JWTSecret, cfg.JWTIssuer)
+
+	keyCache := authn.NewKeyCache(cfg.Auth.JWKSURL,
+		authn.WithHTTPClient(&http.Client{Timeout: cfg.Auth.JWKSTimeout}),
+		authn.WithLogger(log))
+	if err := keyCache.RefreshWithRetry(ctx, cfg.Auth.StartupTimeout); err != nil {
+		log.Error("load auth signing keys", "err", err)
+		os.Exit(1)
+	}
+	keyCache.StartBackgroundRefresh(ctx, cfg.Auth.JWKSRefreshInterval)
+
+	verifier := authn.NewVerifier(keyCache, cfg.Auth.Issuer)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,

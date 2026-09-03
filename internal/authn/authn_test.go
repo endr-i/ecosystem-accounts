@@ -1,37 +1,27 @@
 package authn
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-func sign(t *testing.T, secret []byte, claims jwt.Claims, method jwt.SigningMethod) string {
+func newTestVerifier(t *testing.T, srv *jwksServer) *Verifier {
 	t.Helper()
-	s, err := jwt.NewWithClaims(method, claims).SignedString(secret)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
+	cache := NewKeyCache(srv.url())
+	if err := cache.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
 	}
-	return s
-}
-
-func validClaims(sub string, exp time.Duration) *jwt.RegisteredClaims {
-	now := time.Now()
-	return &jwt.RegisteredClaims{
-		Subject:   sub,
-		Issuer:    "ecosystem-auth",
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(exp)),
-	}
+	return NewVerifier(cache, "ecosystem-auth")
 }
 
 func TestVerifyAccessToken(t *testing.T) {
-	secret := []byte("test-secret")
-	v := NewVerifier(secret, "ecosystem-auth")
+	key := newTestKey(t, "key-2026-09")
+	v := newTestVerifier(t, newJWKSServer(t, key))
 
-	token := sign(t, secret, validClaims("user-1", time.Minute), jwt.SigningMethodHS256)
-	got, err := v.VerifyAccessToken(token)
+	got, err := v.VerifyAccessToken(context.Background(), key.sign(t, claimsFor("user-1", time.Minute)))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -41,38 +31,87 @@ func TestVerifyAccessToken(t *testing.T) {
 }
 
 func TestVerifyAccessTokenRejects(t *testing.T) {
-	secret := []byte("test-secret")
-	v := NewVerifier(secret, "ecosystem-auth")
+	key := newTestKey(t, "key-2026-09")
+	other := newTestKey(t, "key-2026-09") // same kid, different private key
+	unpublished := newTestKey(t, "key-unpublished")
+	v := newTestVerifier(t, newJWKSServer(t, key))
+
+	noKid := jwt.NewWithClaims(jwt.SigningMethodRS256, claimsFor("user-1", time.Minute))
+	noKidStr, err := noKid.SignedString(key.priv)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
 
 	tests := map[string]string{
-		"wrong secret": sign(t, []byte("other"), validClaims("user-1", time.Minute), jwt.SigningMethodHS256),
-		"expired":      sign(t, secret, validClaims("user-1", -time.Minute), jwt.SigningMethodHS256),
-		"wrong issuer": sign(t, secret, &jwt.RegisteredClaims{
+		"wrong signing key": other.sign(t, claimsFor("user-1", time.Minute)),
+		"unknown kid":       unpublished.sign(t, claimsFor("user-1", time.Minute)),
+		"expired":           key.sign(t, claimsFor("user-1", -time.Minute)),
+		"wrong issuer": key.sign(t, &jwt.RegisteredClaims{
 			Subject:   "user-1",
 			Issuer:    "someone-else",
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
-		}, jwt.SigningMethodHS256),
-		"no subject": sign(t, secret, &jwt.RegisteredClaims{
+		}),
+		"no subject": key.sign(t, &jwt.RegisteredClaims{
 			Issuer:    "ecosystem-auth",
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
-		}, jwt.SigningMethodHS256),
-		"garbage": "not-a-token",
+		}),
+		"missing kid header": noKidStr,
+		"garbage":            "not-a-token",
 	}
 	for name, token := range tests {
-		if _, err := v.VerifyAccessToken(token); err == nil {
+		if _, err := v.VerifyAccessToken(context.Background(), token); err == nil {
 			t.Errorf("%s: expected error, got nil", name)
 		}
 	}
 }
 
+// An HS256 token signed with the RSA modulus is the classic algorithm
+// confusion attack; WithValidMethods must reject it.
+func TestVerifyAccessTokenRejectsAlgorithmConfusion(t *testing.T) {
+	key := newTestKey(t, "key-2026-09")
+	v := newTestVerifier(t, newJWKSServer(t, key))
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claimsFor("user-1", time.Minute))
+	token.Header["kid"] = key.kid
+	forged, err := token.SignedString(key.priv.PublicKey.N.Bytes())
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	if _, err := v.VerifyAccessToken(context.Background(), forged); err == nil {
+		t.Fatal("expected error for HS256 token")
+	}
+}
+
 func TestVerifyAccessTokenRejectsNoneAlg(t *testing.T) {
-	v := NewVerifier([]byte("test-secret"), "ecosystem-auth")
-	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, validClaims("user-1", time.Minute)).
-		SignedString(jwt.UnsafeAllowNoneSignatureType)
+	key := newTestKey(t, "key-2026-09")
+	v := newTestVerifier(t, newJWKSServer(t, key))
+
+	token := jwt.NewWithClaims(jwt.SigningMethodNone, claimsFor("user-1", time.Minute))
+	token.Header["kid"] = key.kid
+	unsigned, err := token.SignedString(jwt.UnsafeAllowNoneSignatureType)
 	if err != nil {
 		t.Fatalf("sign none: %v", err)
 	}
-	if _, err := v.VerifyAccessToken(unsigned); err == nil {
+	if _, err := v.VerifyAccessToken(context.Background(), unsigned); err == nil {
 		t.Fatal("expected error for alg=none token")
+	}
+}
+
+// An empty issuer disables the `iss` check.
+func TestVerifyAccessTokenWithoutIssuerCheck(t *testing.T) {
+	key := newTestKey(t, "key-2026-09")
+	cache := NewKeyCache(newJWKSServer(t, key).url())
+	if err := cache.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	v := NewVerifier(cache, "")
+
+	token := key.sign(t, &jwt.RegisteredClaims{
+		Subject:   "user-1",
+		Issuer:    "anything",
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
+	})
+	if _, err := v.VerifyAccessToken(context.Background(), token); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
