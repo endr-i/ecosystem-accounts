@@ -118,6 +118,23 @@ func withSuffix(base string, n int) string {
 }
 
 // List returns the accounts the user is a member of.
-func (s *Service) List(ctx context.Context, userID string) ([]Membership, error) {
-	return s.repo.ListForUser(ctx, userID)
+func (s *Service) List(ctx context.Context, userID string, limit, offset int) ([]Membership, int, error) {
+	return s.repo.ListForUser(ctx, userID, limit, offset)
+}
+
+func (s *Service) GetById(ctx context.Context, userID string, accountID string) (*Membership, error) {
+	return s.repo.GetByIdForUser(ctx, userID, accountID)
+}
+
+func (s *Service) Delete(ctx context.Context, userID string, accountID string) error {
+	return s.repo.DeleteForUser(ctx, userID, accountID)
+}
+
+func (s *Service) Update(ctx context.Context, userID string, accountID string, name, slug string) (*Membership, error) {
+	err := s.repo.UpdateForUser(ctx, userID, accountID, name)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.repo.GetByIdForUser(ctx, userID, accountID)
 }

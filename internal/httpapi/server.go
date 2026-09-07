@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/endr-i/ecosystem-accounts/internal/account"
@@ -26,6 +27,9 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/v1/accounts", s.requireAuth(http.HandlerFunc(s.handleCreateAccount)))
 	mux.Handle("GET /api/v1/accounts", s.requireAuth(http.HandlerFunc(s.handleListAccounts)))
+	mux.Handle("GET /api/v1/accounts/{account_id}", s.requireAuth(http.HandlerFunc(s.handleGetAccount)))
+	mux.Handle("DELETE /api/v1/accounts/{account_id}", s.requireAuth(http.HandlerFunc(s.handleDeleteAccount)))
+	mux.Handle("PUT /api/v1/accounts/{account_id}", s.requireAuth(http.HandlerFunc(s.handleUpdateAccount)))
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	return s.withLogging(mux)
 }
@@ -58,12 +62,76 @@ func (s *Server) handleCreateAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 	userID := UserIDFromContext(r.Context())
-	memberships, err := s.accounts.List(r.Context(), userID)
+	limit := 20
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			http.Error(w, "invalid limit", http.StatusBadRequest)
+			return
+		}
+		limit = n
+	}
+
+	if v := r.URL.Query().Get("offset"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			http.Error(w, "invalid offset", http.StatusBadRequest)
+			return
+		}
+		offset = n
+	}
+
+	memberships, total, err := s.accounts.List(r.Context(), userID, limit, offset)
 	if err != nil {
 		s.internalError(w, r, err)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"accounts": memberships})
+	s.writeJSON(w, http.StatusOK, map[string]any{"items": memberships, "total": total})
+}
+
+func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
+	userID := UserIDFromContext(r.Context())
+	accountID := r.PathValue("account_id")
+	membership, err := s.accounts.GetById(r.Context(), userID, accountID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"item": membership})
+}
+
+func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
+	userID := UserIDFromContext(r.Context())
+	accountID := r.PathValue("account_id")
+	err := s.accounts.Delete(r.Context(), userID, accountID)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
+	var req createAccountRequest
+	if !s.decode(w, r, &req) {
+		return
+	}
+	userID := UserIDFromContext(r.Context())
+	accountID := r.PathValue("account_id")
+	membership, err := s.accounts.Update(r.Context(), userID, accountID, req.Name, req.Slug)
+	if err != nil {
+		switch {
+		case errors.Is(err, account.ErrValidation):
+			s.writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, account.ErrSlugTaken):
+			s.writeError(w, http.StatusConflict, "slug already taken")
+		default:
+			s.internalError(w, r, err)
+		}
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"item": membership})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

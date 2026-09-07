@@ -71,34 +71,96 @@ func (r *Repository) CreateWithOwner(ctx context.Context, name, slug, userID str
 
 // ListForUser returns every non-deleted account the user is a member of,
 // together with their membership role and status.
-func (r *Repository) ListForUser(ctx context.Context, userID string) ([]Membership, error) {
+func (r *Repository) ListForUser(ctx context.Context, userID string, limit, offset int) ([]Membership, int, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT a.id, a.name, a.slug, a.status, a.created_at, a.updated_at,
+		       m.role, m.status, m.created_at, COUNT(*) OVER() AS total
+		FROM accounts a
+		JOIN account_members m ON m.account_id = a.id
+		WHERE m.user_id = $1 AND a.status <> 'DELETED'
+		ORDER BY a.created_at DESC
+		LIMIT $2 OFFSET $3`, userID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list accounts: %w", err)
+	}
+	defer rows.Close()
+
+	memberships := make([]Membership, 0)
+	total := 0
+	for rows.Next() {
+		var m Membership
+		if err := rows.Scan(
+			&m.ID, &m.Name, &m.Slug, &m.Status, &m.CreatedAt, &m.UpdatedAt,
+			&m.Role, &m.MemberStatus, &m.MemberSince, &total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan account: %w", err)
+		}
+		memberships = append(memberships, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate accounts: %w", err)
+	}
+	return memberships, total, nil
+}
+
+func (r *Repository) GetByIdForUser(ctx context.Context, userID string, accountID string) (*Membership, error) {
 	rows, err := r.pool.Query(ctx, `
 		SELECT a.id, a.name, a.slug, a.status, a.created_at, a.updated_at,
 		       m.role, m.status, m.created_at
 		FROM accounts a
 		JOIN account_members m ON m.account_id = a.id
-		WHERE m.user_id = $1 AND a.status <> 'DELETED'
-		ORDER BY a.created_at DESC`, userID)
+		WHERE m.user_id = $1 AND a.status <> 'DELETED' AND a.id = $2
+		ORDER BY a.created_at DESC`, userID, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list accounts: %w", err)
 	}
 	defer rows.Close()
-
-	memberships := make([]Membership, 0)
-	for rows.Next() {
-		var m Membership
+	var m Membership
+	if rows.Next() {
 		if err := rows.Scan(
 			&m.ID, &m.Name, &m.Slug, &m.Status, &m.CreatedAt, &m.UpdatedAt,
 			&m.Role, &m.MemberStatus, &m.MemberSince,
 		); err != nil {
 			return nil, fmt.Errorf("scan account: %w", err)
 		}
-		memberships = append(memberships, m)
+	} else {
+		return nil, ErrNotFound
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate accounts: %w", err)
 	}
-	return memberships, nil
+	return &m, nil
+}
+
+func (r *Repository) DeleteForUser(ctx context.Context, userID string, accountID string) error {
+	_, err := r.pool.Exec(ctx, `
+		UPDATE accounts
+		SET status = 'DELETED', updated_at = NOW()
+		WHERE id = $1 AND EXISTS (
+			SELECT 1 FROM account_members
+			WHERE account_id = $1 AND user_id = $2
+		)`, accountID, userID)
+	if err != nil {
+		return fmt.Errorf("delete account: %w", err)
+	}
+	return nil
+}
+
+func (r *Repository) UpdateForUser(ctx context.Context, userID string, accountID string, name string) error {
+	result, err := r.pool.Exec(ctx, `
+		UPDATE accounts
+		SET name = $1, updated_at = NOW()
+		WHERE id = $2 AND EXISTS (
+			SELECT 1 FROM account_members
+			WHERE account_id = $2 AND user_id = $3
+		)`, name, accountID, userID)
+	if err != nil {
+		return fmt.Errorf("update account: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // SlugExists reports whether an account already uses the given slug.
